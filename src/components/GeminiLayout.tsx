@@ -9,8 +9,7 @@ import { generatePostFn, savePostFn, generateAndUploadImageFn } from '../server/
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Document, Packer, Paragraph, TextRun, ImageRun } from 'docx';
-import { saveAs } from 'file-saver';
-
+import FileSaver from 'file-saver';
 // --- SUB-COMPONENT: REALISTIC SOCIAL MEDIA MOCKUPS ---
 const SocialPostMockup = ({ platform, content, image }: { platform: string, content: string, image: string }) => {
   const containerClass = "w-full max-w-md mx-auto rounded-xl overflow-hidden shadow-2xl border";
@@ -188,7 +187,7 @@ const GeminiLayout = () => {
         });
 
         Packer.toBlob(doc).then(blob => {
-            saveAs(blob, "social-media-post.docx");
+            FileSaver.saveAs(blob, "social-media-post.docx");
         });
     };
 

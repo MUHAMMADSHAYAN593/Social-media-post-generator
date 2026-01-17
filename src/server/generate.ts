@@ -2,24 +2,24 @@ import { createServerFn } from '@tanstack/react-start'
 import { createClient } from '@supabase/supabase-js'
 import { z } from 'zod'
 import fetch from 'node-fetch';
+import Groq from 'groq-sdk'; // Import Groq
 
-// Inside generate.tsx
 
+// --- HELPER: SUPABASE CLIENT ---
 const getSupabase = () => {
-    // Check if we are on the server and have the service key
     if (process.env.SUPABASE_SERVICE_ROLE_KEY) {
         return createClient(
             process.env.VITE_SUPABASE_URL!,
             process.env.SUPABASE_SERVICE_ROLE_KEY
         );
     }
-    // Fallback (or keep your original return)
     return createClient(
         process.env.VITE_SUPABASE_URL!,
         process.env.VITE_SUPABASE_ANON_KEY!
     );
 }
 
+// --- SCHEMAS ---
 const GeneratePostSchema = z.object({
     prompt: z.string(),
     platform: z.string(),
@@ -32,85 +32,65 @@ const SavePostSchema = z.object({
     image_url: z.string(),
 })
 
-interface OpenRouterResponse {
-    choices: {
-        message: {
-            content: string;
-        };
-    }[];
-}
-
+// --- 1. GENERATE TEXT (Using GROQ API) ---
 export const generatePostFn = createServerFn({ method: 'POST' })
     .inputValidator(GeneratePostSchema)
     .handler(async ({ data }: { data: z.infer<typeof GeneratePostSchema> }) => {
         const { prompt, platform } = data;
 
-        // Get OpenRouter API key
-        const apiKey = "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";
-        if (!apiKey) throw new Error("OPEN_ROUTER_KEY is not set");
+        const apiKey = process.env.GROQ_API_KEY;
+        if (!apiKey) throw new Error("GROQ_API_KEY is not set in .env file");
 
-        // 1. Generate Text using OpenRouter
+        const groq = new Groq({ apiKey });
+
         const textPrompt = `Write a creative and engaging social media post for ${platform}. 
-    Topic: ${prompt}.
-    Include a few hashtags. return ONLY the text content.`;
+        Topic: ${prompt}.
+        Include a few hashtags. Return ONLY the text content, no introductory text like 'Here is a post'.`;
 
-        const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${apiKey}`,
-                'Content-Type': 'application/json',
-                'HTTP-Referer': 'http://localhost:3002',
-                'X-Title': 'Social Media Post Generator'
-            },
-            body: JSON.stringify({
-                model: 'mistralai/devstral-2512:free',
-                messages: [
-                    {
-                        role: 'user',
-                        content: textPrompt
-                    }
-                ]
-            })
-        });
+        try {
+            const chatCompletion = await groq.chat.completions.create({
+                messages: [{ role: "user", content: textPrompt }],
+                model: "openai/gpt-oss-120b", // Free, fast, and high quality
+                temperature: 0.7,
+                max_tokens: 1024,
+            });
 
-        if (!response.ok) {
-            const errorText = await response.text();
-            console.error('OpenRouter API Error:', errorText);
-            throw new Error(`OpenRouter API failed: ${response.status} ${response.statusText}`);
+            const generatedText = chatCompletion.choices[0]?.message?.content || "Failed to generate content";
+            return { content: generatedText };
+
+        } catch (error) {
+            console.error("Groq API Error:", error);
+            throw new Error("Failed to generate text with Groq");
         }
-
-        const result = await response.json() as OpenRouterResponse;
-
-        if (!result.choices || !result.choices[0] || !result.choices[0].message) {
-            console.error('Invalid OpenRouter API response format');
-            throw new Error('Failed to generate content due to invalid API response');
-        }
-
-        const generatedText = result.choices[0]?.message?.content || 'Failed to generate content';
-
-        // Return just the content - image will be generated on client
-        return { content: generatedText };
     });
 
+
+// --- 2. GENERATE IMAGE (Pollinations - Free) ---
 export const generateAndUploadImageFn = createServerFn({ method: 'POST' })
     .inputValidator(GeneratePostSchema)
     .handler(async ({ data }: { data: z.infer<typeof GeneratePostSchema> }) => {
         const { prompt, platform } = data;
         const supabase = getSupabase();
 
-        const imagePrompt = encodeURIComponent(`Professional ${platform} social media image about: ${prompt}`);
+        // 1. Generate Image URL
+        const imagePrompt = encodeURIComponent(`Professional ${platform} social media image about: ${prompt}, high quality, photorealistic, 4k, no text`);
         const seed = Math.floor(Math.random() * 999999);
         const pollutionsUrl = `https://image.pollinations.ai/prompt/${imagePrompt}?width=1024&height=1024&nologo=true&seed=${seed}&model=flux`;
 
+        // 2. Download Image
         const response = await fetch(pollutionsUrl);
+        if (!response.ok) throw new Error("Failed to generate image from AI provider");
+        
         const arrayBuffer = await response.arrayBuffer();
         const buffer = Buffer.from(arrayBuffer);
 
+        // 3. Upload to Supabase
         const fileName = `post-images/${Date.now()}.png`;
-        const { data: uploadData, error: uploadError } = await supabase.storage
+        const { error: uploadError } = await supabase.storage
             .from('posts')
             .upload(fileName, buffer, {
                 contentType: 'image/png',
+                upsert: true
             });
 
         if (uploadError) {
@@ -118,6 +98,7 @@ export const generateAndUploadImageFn = createServerFn({ method: 'POST' })
             throw new Error('Failed to upload image to Supabase Storage');
         }
 
+        // 4. Get Public URL
         const { data: publicUrlData } = supabase.storage
             .from('posts')
             .getPublicUrl(fileName);
@@ -126,13 +107,13 @@ export const generateAndUploadImageFn = createServerFn({ method: 'POST' })
     });
 
 
+// --- 3. SAVE TO DB ---
 export const savePostFn = createServerFn({ method: 'POST' })
     .inputValidator(SavePostSchema)
     .handler(async ({ data }: { data: z.infer<typeof SavePostSchema> }) => {
         const { prompt, platform, content, image_url } = data;
         const supabase = getSupabase();
 
-        // Save to Supabase
         const { data: savedPost, error } = await supabase
             .from('posts')
             .insert({
@@ -145,8 +126,8 @@ export const savePostFn = createServerFn({ method: 'POST' })
             .single();
 
         if (error) {
-            console.error("Supabase Error:", error);
-            throw new Error("Failed to save post");
+            console.error("Supabase DB Error:", error);
+            throw new Error("Failed to save post history");
         }
 
         return savedPost;
